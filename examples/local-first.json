@@ -1,0 +1,22 @@
+{
+  "id": "local-first",
+  "name": "Local first, cloud when needed",
+  "mode": "custom",
+  "router_model": "laya",
+  "routes": [
+    {"label": "local", "description": "routine request with no sensitive data", "examples": [],
+     "action": "forward", "model_id": "CHANGE-ME-ollama-model", "system_prompt": "", "response_text": "", "color": "#2E9E6B"},
+    {"label": "private", "description": "contains personal, financial or confidential data", "examples": ["my IBAN is", "patient record"],
+     "action": "forward", "model_id": "CHANGE-ME-ollama-model", "system_prompt": "Handle this as confidential. Never repeat identifiers back unnecessarily.", "response_text": "", "color": "#13262B"},
+    {"label": "cloud", "description": "hard problem that a small local model would likely get wrong", "examples": [],
+     "action": "forward", "model_id": "CHANGE-ME-cloud-model", "system_prompt": "", "response_text": "", "color": "#E8A317"}
+  ],
+  "fallback_label": "local",
+  "min_confidence": 0.0,
+  "signals": [
+    {"name": "sensitive", "type": "noul", "instructions": "Does the text contain personal, financial or confidential data?", "criteria": null}
+  ],
+  "rules": [
+    {"signal": "sensitive", "op": "gte", "value": "0.5", "route_label": "private"}
+  ]
+}

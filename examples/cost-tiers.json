@@ -1,0 +1,18 @@
+{
+  "id": "cost-tiers",
+  "name": "Cost tiers",
+  "mode": "tier",
+  "router_model": "laya",
+  "routes": [
+    {"label": "small", "description": "short, factual or casual: greetings, definitions, quick rewrites", "examples": [],
+     "action": "forward", "model_id": "CHANGE-ME", "system_prompt": "", "response_text": "", "color": "#2E9E6B"},
+    {"label": "normal", "description": "needs some reasoning or writing: summaries, emails, light coding", "examples": [],
+     "action": "forward", "model_id": "CHANGE-ME", "system_prompt": "", "response_text": "", "color": "#2F6FDE"},
+    {"label": "huge", "description": "hard or long: multi-step reasoning, architecture, large code changes", "examples": [],
+     "action": "forward", "model_id": "CHANGE-ME", "system_prompt": "", "response_text": "", "color": "#D1483A"}
+  ],
+  "fallback_label": "normal",
+  "min_confidence": 0.5,
+  "signals": [],
+  "rules": []
+}

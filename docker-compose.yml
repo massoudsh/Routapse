@@ -1,0 +1,59 @@
+# Routapse: gateway (data plane), admin (control plane), router sidecar, GUI, Redis.
+# Build-time mirrors/options are read from .env (see .env.example).
+
+x-python-build: &python-build
+  PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+  PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim}
+
+services:
+  router:            # classifier sidecar: Laya (local Python package, opt-in) + Jev (HTTP)
+    build:
+      context: ./router
+      args:
+        <<: *python-build
+        INSTALL_LAYA: ${INSTALL_LAYA:-0}
+    env_file: .env
+    ports: ["8001:8001"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes: ["laya-cache:/root/.cache"]   # Laya downloads checkpoints on first use
+
+  gateway:           # OpenAI-compatible data plane: scale this one for traffic
+    build:
+      context: ./backend
+      args: *python-build
+    env_file: .env
+    environment: { ROLE: gateway, LOG_DIR: /logs }
+    ports: ["8000:8000"]
+    depends_on: [router, redis]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes: ["logs:/logs"]
+
+  admin:             # control plane: config, prompt studio, logs, Ollama discovery
+    build:
+      context: ./backend
+      args: *python-build
+    env_file: .env
+    environment: { ROLE: admin, LOG_DIR: /logs }
+    ports: ["8002:8000"]
+    depends_on: [router, redis]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes: ["logs:/logs"]
+
+  frontend:          # GUI (static build behind nginx)
+    build:
+      context: ./frontend
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:20-alpine}
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    environment: { BACKEND_URL: "http://admin:8000" }
+    ports: ["3000:80"]
+    depends_on: [admin]
+
+  redis:
+    image: redis:7-alpine
+    volumes: [redis-data:/data]
+
+volumes:
+  redis-data:
+  logs:
+  laya-cache:
