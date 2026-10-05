@@ -46,7 +46,7 @@ async def decide(router: RouterDef, messages: list[dict], force_label: str | Non
         prior = " ".join(m["content"] for m in messages[-4:-1] if m["role"] != "system")[-800:]
         if prior:
             prompt = f"(earlier context: {prior})\n{last_user}"
-    signals_def = [s.model_dump() for s in router.signals] if router.router_model == "laya" else []
+    signals_def = [s.model_dump() for s in router.signals]
     t0 = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=120) as c:  # first Laya call may download a checkpoint

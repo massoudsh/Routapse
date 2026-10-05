@@ -1,8 +1,11 @@
 """Router sidecar: turns (prompt + labelled routes [+ signals]) into one chosen label.
 
+Both router models speak the same "questions" format (state + questions -> answers):
 - Laya runs IN-PROCESS through its Python package: Router().predict(state, questions).
-  Besides the routing choice it can answer extra questions ("signals") in the same call.
-- Jev is reached over HTTP (Ollama or any OpenAI-compatible server).
+- Jev is a hosted HTTP API (JEV_KIND=systemone): POST {state, model, questions}.
+  Ollama and OpenAI-compatible servers are also supported for Jev (JEV_KIND=ollama | openai_compat),
+  but those can only choose a lane: signals are ignored.
+Besides the routing choice, the questions API can answer extra "signals" in the same call.
 If a router model fails, a keyword heuristic answers so the gateway never hard-fails.
 """
 import json, os, re, time
@@ -38,19 +41,8 @@ class ClassifyIn(BaseModel):
     model: Literal["jev", "laya"] = "laya"
 
 
-# ------------------------------------------------------------------ Laya (local package)
-_laya = None
-
-
-def get_laya():
-    global _laya
-    if _laya is None:
-        from laya import Router  # imported lazily so Jev-only installs work without it
-        _laya = Router(preload=os.getenv("LAYA_PRELOAD", "0") == "1")
-    return _laya
-
-
-def laya_questions(req: ClassifyIn) -> dict:
+# ------------------------------------------------------------------ shared questions format
+def build_questions(req: ClassifyIn) -> dict:
     criteria = {}
     for c in req.candidates:
         desc = c.description or c.label
@@ -74,27 +66,67 @@ def first_number(d: dict, keys=("confidence", "probability", "prob", "score")):
     return None
 
 
-async def classify_laya(req: ClassifyIn):
-    result = await run_in_threadpool(get_laya().predict, req.prompt, laya_questions(req))
-    answers = result["answers"]
+def extract(result: Any, req: ClassifyIn) -> dict:
+    """Read a Laya/Jev questions response: {"answers": {name: {type: value}}, "routing": {...}}."""
+    answers = result.get("answers") if isinstance(result, dict) else None
+    if not isinstance(answers, dict) or ROUTE_Q not in answers:
+        keys = list(result)[:6] if isinstance(result, dict) else type(result).__name__
+        raise ValueError(f"unexpected response shape (top-level keys: {keys})")
     route = answers[ROUTE_Q]
+    if isinstance(route, str):
+        route = {"choice": route}
     label = route.get("choice")
     conf = first_number(route)
     probs = route.get("probabilities") or route.get("probs") or route.get("scores")
     if conf is None and isinstance(probs, dict) and label in probs:
         conf = float(probs[label])
-    signals = {s.name: (answers.get(s.name) or {}).get(s.type) for s in req.signals}
-    return {"label": label, "confidence": conf, "signals": signals,
-            "laya_model": (result.get("routing") or {}).get("model")}
+    signals = {}
+    for s in req.signals:
+        a = answers.get(s.name)
+        signals[s.name] = a.get(s.type) if isinstance(a, dict) else None
+    routing = result.get("routing") if isinstance(result.get("routing"), dict) else {}
+    return {"label": label, "confidence": conf, "signals": signals, "laya_model": routing.get("model")}
 
 
-# ------------------------------------------------------------------ Jev (HTTP)
+# ------------------------------------------------------------------ Laya (local package)
+_laya = None
+
+
+def get_laya():
+    global _laya
+    if _laya is None:
+        from laya import Router  # imported lazily so Jev-only installs work without it
+        _laya = Router(preload=os.getenv("LAYA_PRELOAD", "0") == "1")
+    return _laya
+
+
+async def classify_laya(req: ClassifyIn):
+    result = await run_in_threadpool(get_laya().predict, req.prompt, build_questions(req))
+    return extract(result, req)
+
+
+# ------------------------------------------------------------------ Jev (hosted API)
 def jev_cfg() -> dict:
-    return {"kind": os.getenv("JEV_KIND", "ollama"),
-            "url": os.getenv("JEV_URL", "http://host.docker.internal:11434").rstrip("/"),
-            "model": os.getenv("JEV_MODEL", "jev"), "key": os.getenv("JEV_API_KEY", "")}
+    kind = os.getenv("JEV_KIND", "systemone")
+    default_url = "https://api.typesafe.ai/v1/systemone" if kind == "systemone" else "http://host.docker.internal:11434"
+    return {"kind": kind, "url": os.getenv("JEV_URL", default_url).rstrip("/"),
+            "model": os.getenv("JEV_MODEL", "jev-latest" if kind == "systemone" else "jev"),
+            "key": os.getenv("JEV_API_KEY", "")}
 
 
+async def classify_jev(req: ClassifyIn):
+    cfg = jev_cfg()
+    if cfg["kind"] == "systemone":
+        async with httpx.AsyncClient(timeout=TIMEOUT) as c:
+            r = await c.post(cfg["url"], headers={"Authorization": f"Bearer {cfg['key']}"},
+                             json={"state": req.prompt, "model": cfg["model"], "questions": build_questions(req)})
+            r.raise_for_status()
+        return extract(r.json(), req)
+    label, conf = parse_label(await ask_jev_chat(build_instruction(req)), [c.label for c in req.candidates])
+    return {"label": label, "confidence": conf, "signals": {}, "laya_model": None}
+
+
+# Fallback kinds: Jev behind an Ollama or OpenAI-compatible chat server (lane choice only).
 def build_instruction(req: ClassifyIn) -> str:
     lines = []
     for c in req.candidates:
@@ -106,7 +138,7 @@ def build_instruction(req: ClassifyIn) -> str:
             f'User request:\n"""\n{req.prompt[:4000]}\n"""')
 
 
-async def ask_jev(instruction: str) -> str:
+async def ask_jev_chat(instruction: str) -> str:
     cfg = jev_cfg()
     async with httpx.AsyncClient(timeout=TIMEOUT) as c:
         if cfg["kind"] == "ollama":
@@ -137,11 +169,6 @@ def parse_label(text: str, labels: list[str]):
     return (hits[0], 0.4) if len(hits) == 1 else (None, 0.0)
 
 
-async def classify_jev(req: ClassifyIn):
-    label, conf = parse_label(await ask_jev(build_instruction(req)), [c.label for c in req.candidates])
-    return {"label": label, "confidence": conf, "signals": {}, "laya_model": None}
-
-
 # ------------------------------------------------------------------ fallback + endpoint
 def tokens(s: str) -> set[str]:
     return set(re.findall(r"[\w']{3,}", s.lower()))
@@ -162,8 +189,8 @@ async def classify(req: ClassifyIn):
     labels = [c.label for c in req.candidates]
     res: dict[str, Any] = {"label": None, "confidence": 0.0, "signals": {}, "laya_model": None}
     source = req.model
-    # Laya can still answer signals even when there is only one lane.
-    if len(labels) == 1 and not (req.model == "laya" and req.signals):
+    # With signals, the router model still has questions to answer even with a single lane.
+    if len(labels) == 1 and not req.signals:
         return {"label": labels[0], "confidence": 1.0, "source": "single lane", "signals": {},
                 "laya_model": None, "latency_ms": 0}
     try:
@@ -171,12 +198,14 @@ async def classify(req: ClassifyIn):
     except ImportError:
         source = "heuristic (laya package not installed in the router image)"
     except Exception as e:  # noqa: BLE001 - any model failure falls back
-        source = f"heuristic ({req.model} failed: {type(e).__name__}: {str(e)[:120]})"
+        detail = (f"{e.response.status_code} {e.response.text[:150]}" if isinstance(e, httpx.HTTPStatusError)
+                  else f"{type(e).__name__}: {str(e)[:120]}")
+        source = f"heuristic ({req.model} failed: {detail})"
     if res["label"] not in labels:
         if source == req.model:
             source = f"heuristic ({req.model} returned an unknown label)"
         res["label"], res["confidence"] = heuristic(req)
-    elif res["confidence"] is None:  # Laya gave a choice but no probability
+    elif res["confidence"] is None:  # a choice came back without a probability
         res["confidence"], source = 1.0, f"{source} (no confidence reported)"
     return {**res, "source": source, "latency_ms": int((time.perf_counter() - t0) * 1000)}
 
@@ -188,4 +217,6 @@ async def healthz():
         laya_ok = True
     except ImportError:
         laya_ok = False
-    return {"ok": True, "laya_installed": laya_ok, "jev": f"{jev_cfg()['kind']}@{jev_cfg()['url']}"}
+    cfg = jev_cfg()
+    return {"ok": True, "laya_installed": laya_ok, "jev": f"{cfg['kind']}@{cfg['url']} model={cfg['model']}",
+            "jev_key_set": bool(cfg["key"])}

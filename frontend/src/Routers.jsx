@@ -25,10 +25,8 @@ const clean = (d) => ({
   ...d,
   id: d.id || slug(d.name) || "untitled",
   routes: d.routes.map((r) => ({ ...r, label: r.label.trim(), examples: r.examples.filter((x) => x.trim()) })),
-  signals: d.router_model === "laya"
-    ? d.signals.filter((s) => s.name.trim()).map(({ _text, ...s }) => ({ ...s, name: s.name.trim(), criteria: fromText(s.type, _text) }))
-    : [],
-  rules: d.router_model === "laya" ? d.rules.filter((r) => r.signal && r.route_label && r.value !== "") : [],
+  signals: d.signals.filter((s) => s.name.trim()).map(({ _text, ...s }) => ({ ...s, name: s.name.trim(), criteria: fromText(s.type, _text) })),
+  rules: d.rules.filter((r) => r.signal && r.route_label && r.value !== ""),
 });
 
 const SIGNAL_TYPES = { noul: "Yes/no probability", score: "Score on levels", choice: "Pick one" };
@@ -40,8 +38,8 @@ function Signals({ draft, setDraft }) {
   const names = draft.signals.map((s) => s.name).filter(Boolean);
   return (
     <section className="signals">
-      <h2>Laya signals and rules</h2>
-      <p className="hint">Laya can answer extra questions about each prompt in the same call. Rules turn those answers into routing: the first matching rule wins over the normal choice.</p>
+      <h2>Signals and rules</h2>
+      <p className="hint">Laya and Jev can answer extra questions about each prompt in the same call. Rules turn those answers into routing: the first matching rule wins over the normal choice.</p>
       {draft.signals.map((s, i) => (
         <div className="sig" key={i}>
           <input aria-label="Signal name" placeholder="churn_risk" value={s.name} onChange={(e) => setSig(i, { ...s, name: slug(e.target.value).replace(/-/g, "_") })} />
@@ -218,9 +216,7 @@ function Editor({ draft, setDraft, models, isNew, onSave, onDelete, goConnection
             </label>
           </div>
 
-          {draft.router_model === "laya"
-            ? <Signals draft={draft} setDraft={setDraft} />
-            : <p className="hint">Signals and rules need Laya. Jev only chooses a lane.</p>}
+          <Signals draft={draft} setDraft={setDraft} />
 
           <div className="tester">
             <input placeholder="Try a prompt to see which lane lights up" value={prompt} onChange={(e) => setPrompt(e.target.value)}
