@@ -248,3 +248,7 @@ Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md). To rep
 ## License
 
 [MIT](LICENSE)
+
+Email: pooyachavoshi@gmail.com
+
+If you find this project useful, consider giving it a ⭐ to support future development.
