@@ -10,6 +10,8 @@
   <img alt="OpenAI-compatible API" src="https://img.shields.io/badge/API-OpenAI--compatible-E8A317">
 </p>
 
+
+
 **Routapse** is an open-source LLM router. A small router model ([Laya](#router-models) or [Jev](#router-models))
 reads each prompt and decides where it goes: which LLM, which specialist agent, or whether to answer
 directly without calling a model at all. Models can be local (Ollama) or hosted (OpenAI, Claude, Gemini,
@@ -25,7 +27,6 @@ You describe the routing in plain language in a GUI, then call it through one Op
 - **Keep data local.** Route sensitive prompts to a local model and send only the rest to the cloud.
 - **Guard before you pay.** Refuse, hand off or answer from a template before any LLM is called.
 - **See everything.** Every request, decision and response is written to a log you can read and search.
-<img width="1280" height="720" alt="ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/62e38933-fa11-45fd-aeee-a0413729e500" />
 
 ## Features
 
@@ -41,6 +42,7 @@ You describe the routing in plain language in a GUI, then call it through one Op
 | **Scales apart** | Gateway, admin API, router sidecar and GUI are separate services. Config lives in Redis. |
 
 ## How it works
+https://github.com/user-attachments/assets/6033e743-056f-44a1-8a1f-571070ce32b0
 
 ```mermaid
 flowchart LR
