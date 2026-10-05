@@ -25,6 +25,7 @@ You describe the routing in plain language in a GUI, then call it through one Op
 - **Keep data local.** Route sensitive prompts to a local model and send only the rest to the cloud.
 - **Guard before you pay.** Refuse, hand off or answer from a template before any LLM is called.
 - **See everything.** Every request, decision and response is written to a log you can read and search.
+<img width="1280" height="720" alt="ezgif com-video-to-gif-converter" src="https://github.com/user-attachments/assets/62e38933-fa11-45fd-aeee-a0413729e500" />
 
 ## Features
 
