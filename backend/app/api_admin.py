@@ -78,11 +78,19 @@ def routers_put(id: str, body: RouterDef):
     if body.id != id:
         raise HTTPException(400, "id in path and body differ")
     labels = [r.label for r in body.routes]
+    if not labels:
+        raise HTTPException(400, "router must have at least one route")
     if len(set(labels)) != len(labels):
         raise HTTPException(400, "route labels must be unique")
+    if body.fallback_label and body.fallback_label not in labels:
+        raise HTTPException(400, f"fallback points at unknown lane '{body.fallback_label}'")
     for r in body.routes:
-        if r.action == "forward" and r.model_id and not store.get("models", r.model_id):
+        if r.action == "forward" and not r.model_id:
+            raise HTTPException(400, f"route '{r.label}' must have a target model")
+        if r.action == "forward" and not store.get("models", r.model_id):
             raise HTTPException(400, f"route '{r.label}': model '{r.model_id}' does not exist")
+    if body.router_model != "laya" and (body.signals or body.rules):
+        raise HTTPException(400, "signals and rules require the Laya router model")
     names = {x.name for x in body.signals}
     for rule in body.rules:
         if rule.signal not in names:
