@@ -80,7 +80,7 @@ class ProviderAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(call.args[0].endswith("/v1beta/models/model-x:generateContent"))
 
     async def test_http_errors_propagate(self):
-        provider = Provider(id="p", kind="openai")
+        provider = Provider(id="p", kind="openai", retries=0)
         post = AsyncMock(return_value=reply({"error": "bad"}, status=429))
         with patch.object(providers.client, "post", post), self.assertRaises(httpx.HTTPStatusError):
             await providers.complete(provider, "model-x", MESSAGES, {})
@@ -151,11 +151,108 @@ class ProviderStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dict(request.url.params), {"key": "key", "alt": "sse"})
 
     async def test_error_status_raises_with_body(self):
-        provider = Provider(id="p", kind="openai")
+        provider = Provider(id="p", kind="openai", retries=0)
         mock = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(429, text="slow down")))
         with patch.object(providers, "client", mock), self.assertRaises(httpx.HTTPStatusError) as error:
             [t async for t in providers.stream(provider, "model-x", MESSAGES, {}, {})]
         self.assertEqual(error.exception.response.text, "slow down")
+
+
+class RetryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        sleep = patch.object(providers.asyncio, "sleep", AsyncMock())
+        self.sleep = sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def serve(self, *replies):
+        """A client whose successive requests get the given replies (an exception is raised instead)."""
+        queue, calls = list(replies), []
+
+        def handler(request):
+            calls.append(request)
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler)), calls
+
+    async def run_complete(self, provider, *replies):
+        mock, calls = self.serve(*replies)
+        with patch.object(providers, "client", mock):
+            return await providers.complete(provider, "m", MESSAGES, {}), calls
+
+    OK = httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async def test_transient_status_is_retried_until_success(self):
+        provider = Provider(id="p", kind="openai", retries=2)
+        (text, _), calls = await self.run_complete(provider, httpx.Response(503), httpx.Response(429), self.OK)
+        self.assertEqual((text, len(calls)), ("ok", 3))
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [0.5, 1.0])
+
+    async def test_connection_errors_and_timeouts_are_retried(self):
+        provider = Provider(id="p", kind="openai", retries=2)
+        (text, _), calls = await self.run_complete(
+            provider, httpx.ConnectError("down"), httpx.ReadTimeout("slow"), self.OK)
+        self.assertEqual((text, len(calls)), ("ok", 3))
+
+    async def test_client_errors_are_not_retried(self):
+        provider = Provider(id="p", kind="openai", retries=3)
+        mock, calls = self.serve(httpx.Response(401, text="bad key"))
+        with patch.object(providers, "client", mock), self.assertRaises(httpx.HTTPStatusError):
+            await providers.complete(provider, "m", MESSAGES, {})
+        self.assertEqual(len(calls), 1)
+        self.sleep.assert_not_called()
+
+    async def test_gives_up_after_configured_retries(self):
+        provider = Provider(id="p", kind="openai", retries=1)
+        mock, calls = self.serve(httpx.Response(500), httpx.Response(500))
+        with patch.object(providers, "client", mock), self.assertRaises(httpx.HTTPStatusError):
+            await providers.complete(provider, "m", MESSAGES, {})
+        self.assertEqual(len(calls), 2)
+
+    async def test_zero_retries_means_single_attempt(self):
+        provider = Provider(id="p", kind="openai", retries=0)
+        mock, calls = self.serve(httpx.Response(503))
+        with patch.object(providers, "client", mock), self.assertRaises(httpx.HTTPStatusError):
+            await providers.complete(provider, "m", MESSAGES, {})
+        self.assertEqual(len(calls), 1)
+
+    async def test_retry_after_header_extends_backoff_up_to_cap(self):
+        provider = Provider(id="p", kind="openai", retries=2)
+        await self.run_complete(
+            provider, httpx.Response(429, headers={"retry-after": "3"}),
+            httpx.Response(429, headers={"retry-after": "120"}), self.OK)
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [3.0, providers.MAX_BACKOFF])
+
+    async def test_provider_timeout_is_applied_per_request(self):
+        provider = Provider(id="p", kind="openai", timeout=7)
+        post = AsyncMock(return_value=reply({"choices": [{"message": {"content": "ok"}}]}))
+        with patch.object(providers.client, "post", post):
+            await providers.complete(provider, "m", MESSAGES, {})
+        self.assertEqual(post.call_args.kwargs["timeout"], 7)
+
+    async def test_stream_retries_before_first_token(self):
+        provider = Provider(id="p", kind="openai", retries=1)
+        body = 'data: {"choices": [{"delta": {"content": "hi"}}]}\n\ndata: [DONE]\n\n'
+        mock, calls = self.serve(httpx.Response(502, text="bad gateway"), httpx.Response(200, content=body.encode()))
+        with patch.object(providers, "client", mock):
+            texts = [t async for t in providers.stream(provider, "m", MESSAGES, {}, {})]
+        self.assertEqual((texts, len(calls)), (["hi"], 2))
+
+    async def test_stream_never_retries_after_text_was_sent(self):
+        provider = Provider(id="p", kind="openai", retries=3)
+
+        async def body():
+            yield b'data: {"choices": [{"delta": {"content": "par"}}]}\n\n'
+            raise httpx.ReadError("lost")
+
+        mock, calls = self.serve(httpx.Response(200, content=body()))
+        got = []
+        with patch.object(providers, "client", mock), self.assertRaises(httpx.ReadError):
+            async for t in providers.stream(provider, "m", MESSAGES, {}, {}):
+                got.append(t)
+        self.assertEqual((got, len(calls)), (["par"], 1))
 
 
 if __name__ == "__main__":

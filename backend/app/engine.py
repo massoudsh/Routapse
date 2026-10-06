@@ -90,25 +90,46 @@ def _provider_error(provider: Provider, e: httpx.HTTPError) -> HTTPException:
     return HTTPException(502, f"could not reach {provider.kind}: {type(e).__name__}")
 
 
-def _target(route: Route, messages: list[dict]) -> tuple[Provider, ModelDef, list[dict]]:
-    if not route.model_id:
+def _target(route: Route, messages: list[dict], model_id: str | None = None):
+    model_id = model_id or route.model_id
+    if not model_id:
         raise HTTPException(400, f"route '{route.label}' has no target model")
-    provider, md = resolve_model(route.model_id)
+    provider, md = resolve_model(model_id)
     msgs = list(messages)
     if route.system_prompt:
         msgs = [{"role": "system", "content": route.system_prompt}] + msgs
     return provider, md, msgs
 
 
+def _candidates(route: Route) -> list[str | None]:
+    return [route.model_id] + ([route.fallback_model_id] if route.fallback_model_id else [])
+
+
+def _fallback_note(route: Route, primary_error: str | None) -> dict:
+    return {"fallback_from": route.model_id, "fallback_reason": primary_error} if primary_error else {}
+
+
 async def execute(route: Route, messages: list[dict], params: dict) -> dict:
     if route.action == "respond":
         return {"text": route.response_text, "model": None, "usage": {}}
-    provider, md, msgs = _target(route, messages)
-    try:
-        text, usage = await providers.complete(provider, md.model_name, msgs, params)
-    except httpx.HTTPError as e:
-        raise _provider_error(provider, e)
-    return {"text": text, "model": md.id, "usage": usage}
+    primary_error = None
+    for i, model_id in enumerate(_candidates(route)):
+        try:
+            provider, md, msgs = _target(route, messages, model_id)
+        except HTTPException:
+            if i == 0:
+                raise
+            break  # a missing fallback must not hide the primary failure
+        try:
+            text, usage = await providers.complete(provider, md.model_name, msgs, params)
+        except httpx.HTTPError as e:
+            err = _provider_error(provider, e)
+            if i == len(_candidates(route)) - 1:
+                raise err if i == 0 else HTTPException(502, f"{primary_error}; fallback {md.id}: {err.detail}")
+            primary_error = err.detail
+            continue
+        return {"text": text, "model": md.id, "usage": usage, **_fallback_note(route, primary_error)}
+    raise HTTPException(502, primary_error)
 
 
 def public(d: dict) -> dict:
@@ -143,6 +164,7 @@ async def run(source: str, messages: list[dict], params: dict, router: RouterDef
         raise
     log_event({**ev, "decision": info, "status": "ok", "target_model": out["model"] if out else None,
                "response": {"text": out["text"], "usage": out["usage"]} if out else None,
+               **({k: out[k] for k in ("fallback_from", "fallback_reason") if k in out} if out else {}),
                "latency_ms": int((time.perf_counter() - t0) * 1000)})
     return info, out
 
@@ -173,11 +195,26 @@ async def run_stream(source: str, messages: list[dict], params: dict, router: Ro
             route = Route(label="direct", model_id=model_id)
         if route.action == "respond":
             model, source_iter, first = None, None, route.response_text
+            usage = {}
         else:
-            provider, md, msgs = _target(route, messages)
-            model, usage = md.id, {}
-            source_iter = providers.stream(provider, md.model_name, msgs, params, usage)
-            first = await anext(source_iter, None)
+            primary_error = None
+            for i, candidate_id in enumerate(_candidates(route)):
+                provider, md, msgs = _target(route, messages, candidate_id)
+                usage = {}
+                source_iter = providers.stream(provider, md.model_name, msgs, params, usage)
+                try:
+                    first = await anext(source_iter, None)
+                except httpx.HTTPError as e:
+                    await source_iter.aclose()
+                    err = _provider_error(provider, e)
+                    if i == len(_candidates(route)) - 1:
+                        raise err if i == 0 else HTTPException(502, f"{primary_error}; fallback {md.id}: {err.detail}")
+                    primary_error = err.detail
+                    continue
+                model = md.id
+                if primary_error:
+                    info = {**(info or {}), **_fallback_note(route, primary_error)}
+                break
     except Exception as e:  # noqa: BLE001 - log, then let FastAPI answer
         if isinstance(e, httpx.HTTPError) and provider:
             e = _provider_error(provider, e)

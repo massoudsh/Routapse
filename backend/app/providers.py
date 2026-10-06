@@ -1,4 +1,5 @@
 """Provider adapters. complete() returns (text, usage); stream() yields text deltas and fills a usage dict."""
+import asyncio
 import json
 
 import httpx
@@ -62,28 +63,55 @@ def _gemini_usage(u: dict) -> dict:
     return {"prompt_tokens": u.get("promptTokenCount"), "completion_tokens": u.get("candidatesTokenCount")}
 
 
+RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+MAX_BACKOFF = 8.0
+
+
+def _retryable(e: httpx.HTTPError) -> bool:
+    if isinstance(e, httpx.HTTPStatusError):
+        return e.response.status_code in RETRY_STATUS
+    return isinstance(e, httpx.TransportError)
+
+
+def _backoff(e: httpx.HTTPError, attempt: int) -> float:
+    delay = 0.5 * 2 ** attempt
+    if isinstance(e, httpx.HTTPStatusError):
+        try:
+            delay = max(delay, float(e.response.headers.get("retry-after", 0)))
+        except ValueError:
+            pass
+    return min(delay, MAX_BACKOFF)
+
+
+async def _post(p: Provider, url: str, kw: dict) -> httpx.Response:
+    """POST with the provider's timeout, retrying transient failures with exponential backoff."""
+    for attempt in range(p.retries + 1):
+        try:
+            r = await client.post(url, timeout=p.timeout, **kw)
+            r.raise_for_status()
+            return r
+        except httpx.HTTPError as e:
+            if attempt == p.retries or not _retryable(e):
+                raise
+            await asyncio.sleep(_backoff(e, attempt))
+
+
 async def _openai_like(p: Provider, model: str, messages, params):
     url, kw = _openai_request(p, model, messages, params)
-    r = await client.post(url, **kw)
-    r.raise_for_status()
-    d = r.json()
+    d = (await _post(p, url, kw)).json()
     return d["choices"][0]["message"]["content"], d.get("usage", {})
 
 
 async def _anthropic(p: Provider, model: str, messages, params):
     url, kw = _anthropic_request(p, model, messages, params)
-    r = await client.post(url, **kw)
-    r.raise_for_status()
-    d = r.json()
+    d = (await _post(p, url, kw)).json()
     text = "".join(b.get("text", "") for b in d["content"] if b["type"] == "text")
     return text, _anthropic_usage(d.get("usage", {}))
 
 
 async def _gemini(p: Provider, model: str, messages, params):
     url, kw = _gemini_request(p, model, messages, params)
-    r = await client.post(url, **kw)
-    r.raise_for_status()
-    d = r.json()
+    d = (await _post(p, url, kw)).json()
     text = "".join(x.get("text", "") for x in d["candidates"][0]["content"]["parts"])
     return text, _gemini_usage(d.get("usageMetadata", {}))
 
@@ -145,11 +173,22 @@ async def stream(p: Provider, model: str, messages: list[dict], params: dict, us
         url, kw = _openai_request(p, model, messages, params)
         kw["json"].update(stream=True, stream_options={"include_usage": True})
         delta = _openai_delta
-    async with client.stream("POST", url, **kw) as r:
-        if r.is_error:
-            await r.aread()  # so the error body is available to the caller
-            r.raise_for_status()
-        async for ev in _events(r):
-            text = delta(ev, usage)
-            if text:
-                yield text
+    for attempt in range(p.retries + 1):
+        started = False
+        try:
+            async with client.stream("POST", url, timeout=p.timeout, **kw) as r:
+                if r.is_error:
+                    await r.aread()  # so the error body is available to the caller
+                    r.raise_for_status()
+                async for ev in _events(r):
+                    text = delta(ev, usage)
+                    if text:
+                        started = True
+                        yield text
+            return
+        except httpx.HTTPError as e:
+            # once text has reached the caller a retry would repeat it, so only retry before that
+            if started or attempt == p.retries or not _retryable(e):
+                raise
+            usage.clear()
+            await asyncio.sleep(_backoff(e, attempt))
