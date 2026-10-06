@@ -238,7 +238,9 @@ routapse/
 - Laya's `score` signal is assumed to return a number, and a `choice` without a reported confidence counts as
   confidence 1.0. Use *Route only* in the router editor to check what your Laya version returns.
 - API keys are stored in plaintext in the store. Keep Redis private and put TLS in front of the services.
-- There is no automated test suite yet. Tests are a welcome contribution.
+- Tests cover the routing engine, provider adapters, gateway/admin API and router sidecar. Run them with
+  `cd backend && STORE_URL=file:///tmp/s.json LOG_DIR=/tmp/l python -m unittest discover -s tests -t .`
+  and `cd router && python -m unittest discover -s tests -t .`. Real Laya/Jev and provider calls are not tested.
 
 ## Contributing
 
