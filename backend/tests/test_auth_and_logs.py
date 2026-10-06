@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -89,6 +90,74 @@ class RequestLogTests(unittest.TestCase):
         info = reqlog.info()
         self.assertEqual(len(info["files"]), 1)
         self.assertTrue(info["bodies"])
+
+    def write_day(self, day, *notes):
+        with open(os.path.join(self.dir.name, f"requests-{day}.jsonl"), "w", encoding="utf-8") as f:
+            for note in notes:
+                f.write(json.dumps({"note": note, "source": "gateway"}, ensure_ascii=False) + "\n")
+
+    def test_reverse_reader_is_correct_across_chunk_boundaries_and_multibyte_text(self):
+        notes = [f"سلام-{i}-" + "é" * (i % 7) for i in range(200)]
+        self.write_day("2026-01-01", *notes)
+        with patch.object(reqlog, "CHUNK", 13):
+            got = [x["note"] for x in reqlog.read_logs(limit=500)]
+        self.assertEqual(got, notes[::-1])
+
+    def test_reverse_reader_drops_only_the_cut_line_when_over_the_byte_cap(self):
+        notes = [f"entry-{i:03d}" for i in range(100)]
+        self.write_day("2026-01-01", *notes)
+        path = os.path.join(self.dir.name, "requests-2026-01-01.jsonl")
+        lines = list(reqlog._reverse_lines(path, max_bytes=300))
+        parsed = [json.loads(line)["note"] for line in lines]
+        self.assertEqual(parsed, notes[::-1][: len(parsed)])
+        self.assertTrue(0 < len(parsed) < 100)
+
+    def test_small_page_reads_little_of_a_large_file(self):
+        self.write_day("2026-01-01", *[f"entry-{i}" for i in range(20000)])
+        path = os.path.join(self.dir.name, "requests-2026-01-01.jsonl")
+        reads = []
+        real_open = open
+
+        def counting_open(p, *a, **kw):
+            f = real_open(p, *a, **kw)
+            if p == path:
+                original = f.read
+                f.read = lambda n=-1: (reads.append(n), original(n))[1]
+            return f
+
+        with patch("builtins.open", counting_open):
+            self.assertEqual(len(reqlog.read_logs(limit=5)), 5)
+        self.assertLessEqual(sum(reads), reqlog.CHUNK)
+
+    def test_empty_and_unterminated_files_are_handled(self):
+        self.write_day("2026-01-01")
+        with open(os.path.join(self.dir.name, "requests-2026-01-02.jsonl"), "w") as f:
+            f.write(json.dumps({"note": "no-newline"}))
+        self.assertEqual([x["note"] for x in reqlog.read_logs()], ["no-newline"])
+
+    def test_retention_is_off_by_default(self):
+        self.write_day("2000-01-01", "ancient")
+        self.assertEqual(reqlog.prune(), 0)
+        self.assertEqual(len(os.listdir(self.dir.name)), 1)
+
+    def test_prune_removes_only_expired_log_files(self):
+        for day in ("2026-03-01", "2026-03-09", "2026-03-10", "2026-03-11"):
+            self.write_day(day, "x")
+        open(os.path.join(self.dir.name, "notes.txt"), "w").close()
+        with patch.object(reqlog.settings, "log_retention_days", 2):
+            removed = reqlog.prune(datetime(2026, 3, 12, 8, tzinfo=timezone.utc))
+        self.assertEqual(removed, 2)
+        self.assertEqual(sorted(os.listdir(self.dir.name)),
+                         ["notes.txt", "requests-2026-03-10.jsonl", "requests-2026-03-11.jsonl"])
+
+    def test_log_event_prunes_at_most_once_per_interval(self):
+        self.write_day("2000-01-01", "ancient")
+        with patch.object(reqlog.settings, "log_retention_days", 1), patch.object(reqlog, "_last_prune", float("-inf")):
+            reqlog.log_event(self.event())
+            self.assertNotIn("requests-2000-01-01.jsonl", os.listdir(self.dir.name))
+            self.write_day("1999-01-01", "ancient")
+            reqlog.log_event(self.event())
+            self.assertIn("requests-1999-01-01.jsonl", os.listdir(self.dir.name))
 
 
 if __name__ == "__main__":

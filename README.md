@@ -177,7 +177,7 @@ force a lane or preview where a prompt would go, keep multi-turn chats, and save
 **Logs.** Every request and response is appended to `requests-YYYY-MM-DD.jsonl` (in Docker, the `logs` volume at
 `/logs`). Each line holds the source, router, request, routing decision, signals, target model, response, token
 usage, status and latency. The Logs page filters by router, source and text. Set `LOG_BODIES=false` to log metadata
-only. Logs contain prompts and answers and are not deleted automatically.
+only. Logs contain prompts and answers and are kept until you set `LOG_RETENTION_DAYS`.
 
 ## API
 
@@ -206,6 +206,7 @@ Everything is set through environment variables (copy [`.env.example`](.env.exam
 | `INSTALL_LAYA` | `0` | Build arg: install the `laya` package into the router image. |
 | `JEV_URL`, `JEV_MODEL`, `JEV_KIND` | | Where Jev is served. |
 | `LOG_DIR`, `LOG_BODIES` | `logs`, `true` | Log location, and whether to log prompt and response text. |
+| `LOG_RETENTION_DAYS` | `0` | Delete daily log files older than this many days. `0` keeps everything. |
 
 All options: **[docs/configuration.md](docs/configuration.md)**.
 
