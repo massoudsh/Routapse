@@ -18,7 +18,7 @@ class RouterValidationTests(unittest.TestCase):
         return RouterDef(**data)
 
     def assert_invalid(self, router, message):
-        with patch("app.api_admin.store.get", return_value={}), self.assertRaises(HTTPException) as error:
+        with patch("app.api_admin.store.get", return_value={"id": "fast-model"}), self.assertRaises(HTTPException) as error:
             routers_put(router.id, router)
         self.assertEqual(error.exception.status_code, 400)
         self.assertEqual(error.exception.detail, message)
