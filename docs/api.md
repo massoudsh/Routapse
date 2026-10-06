@@ -31,7 +31,12 @@ The response is a standard chat completion plus:
 }
 ```
 
-`stream: true` returns valid SSE, but the whole answer arrives as one chunk.
+`stream: true` returns server-sent events with tokens forwarded as the provider produces them. The final
+chunk before `[DONE]` carries the routing decision in a `routapse` field. Lanes that reply directly send
+their fixed text as one chunk. Routing and provider connection errors that happen before the first token
+return a normal HTTP error (for example 502). If the provider fails midway, the stream ends with a
+`data: {"error": {...}}` event and no `[DONE]`. The request log is written when the stream ends, so a
+request abandoned by the client is logged with status `cancelled` and the text sent so far.
 
 ### `POST /v1/route/{router_id}`
 

@@ -233,7 +233,8 @@ routapse/
 
 ## Limitations
 
-- Streaming is wire-compatible but not token by token: the full answer arrives as one SSE chunk.
+- Streaming forwards tokens as providers produce them, but is not verified against live providers (tests use
+  recorded-style SSE fixtures). Token usage is reported only if the provider sends it.
 - Tool calls, images and other non-text message parts are not forwarded.
 - Laya's `score` signal is assumed to return a number, and a `choice` without a reported confidence counts as
   confidence 1.0. Use *Route only* in the router editor to check what your Laya version returns.

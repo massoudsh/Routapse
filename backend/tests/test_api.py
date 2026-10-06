@@ -12,6 +12,7 @@ from app.main import app
 from app.store import store
 from tests.test_engine import FakeRouterClient, response
 
+REAL_ASYNC_CLIENT = httpx.AsyncClient  # classify_as() patches the class globally
 PROVIDER = {"id": "local", "kind": "openai_compat", "base_url": "http://llm/v1", "api_key": "secret"}
 MODEL = {"id": "fast", "provider_id": "local", "model_name": "llama"}
 ROUTER = {
@@ -24,6 +25,11 @@ ROUTER = {
     "fallback_label": "answer",
 }
 COMPLETION = {"choices": [{"message": {"content": "hello"}}], "usage": {"total_tokens": 3}}
+
+
+def sse_reply(events):
+    body = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+    return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
 
 
 class ApiTestCase(unittest.TestCase):
@@ -46,6 +52,10 @@ class ApiTestCase(unittest.TestCase):
     def classify_as(self, label, confidence=0.9):
         result = {"label": label, "confidence": confidence, "signals": {}, "source": "jev"}
         return patch("app.engine.httpx.AsyncClient", return_value=FakeRouterClient(response(200, json=result)))
+
+    def provider_stream(self, handler):
+        mock = REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+        return patch.object(providers, "client", mock)
 
     def provider_replies(self):
         reply = httpx.Response(200, json=COMPLETION, request=httpx.Request("POST", "http://llm"))
@@ -83,13 +93,68 @@ class GatewayTests(ApiTestCase):
         self.assertEqual(r.json()["routapse"], None)
         self.assertEqual(r.headers["x-routapse-route"], "direct")
 
-    def test_stream_sends_single_chunk_then_done(self):
-        with self.provider_replies():
+    def stream(self, model="router:support"):
+        r = self.client.post("/v1/chat/completions", json={
+            "model": model, "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        events = [line[6:] for line in r.text.splitlines() if line.startswith("data: ")]
+        return r, [e if e == "[DONE]" else json.loads(e) for e in events]
+
+    def test_stream_forwards_provider_tokens_as_they_arrive(self):
+        calls = []
+
+        def handler(request):
+            calls.append(json.loads(request.content))
+            return sse_reply([
+                {"choices": [{"delta": {"role": "assistant", "content": ""}}]},
+                {"choices": [{"delta": {"content": "he"}}]},
+                {"choices": [{"delta": {"content": "llo"}}]},
+                {"choices": [], "usage": {"total_tokens": 3}},
+            ])
+
+        with self.classify_as("answer"), self.provider_stream(handler):
+            r, events = self.stream()
+        deltas = [e["choices"][0]["delta"].get("content") for e in events[:-1]]
+        self.assertEqual(deltas, ["", "he", "llo", None])
+        self.assertEqual(events[-2]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(events[-2]["routapse"]["label"], "answer")
+        self.assertEqual(events[-1], "[DONE]")
+        self.assertEqual(r.headers["x-routapse-model"], "fast")
+        self.assertTrue(calls[0]["stream"])
+        entry = reqlog.read_logs()[0]
+        self.assertEqual((entry["status"], entry["response"]["text"]), ("ok", "hello"))
+        self.assertEqual(entry["response"]["usage"], {"total_tokens": 3})
+
+    def test_stream_respond_lane_sends_canned_text_without_provider(self):
+        def handler(request):
+            raise AssertionError("provider must not be called")
+
+        with self.classify_as("refuse"), self.provider_stream(handler):
+            r, events = self.stream()
+        self.assertEqual(events[1]["choices"][0]["delta"]["content"], "No.")
+        self.assertEqual(events[-1], "[DONE]")
+        self.assertEqual(r.headers["x-routapse-model"], "router:support")
+        self.assertEqual(reqlog.read_logs()[0]["status"], "ok")
+
+    def test_stream_provider_error_before_first_token_is_a_502(self):
+        with self.provider_stream(lambda request: httpx.Response(500, text="boom")):
             r = self.client.post("/v1/chat/completions", json={
                 "model": "fast", "stream": True, "messages": [{"role": "user", "content": "hi"}]})
-        events = [line[6:] for line in r.text.splitlines() if line.startswith("data: ")]
-        self.assertEqual(events[-1], "[DONE]")
-        self.assertEqual(json.loads(events[0])["choices"][0]["delta"]["content"], "hello")
+        self.assertEqual(r.status_code, 502)
+        self.assertIn("boom", r.json()["detail"])
+        self.assertEqual(reqlog.read_logs()[0]["status"], "error")
+
+    def test_stream_failure_midway_reports_error_and_logs_partial_text(self):
+        async def body():
+            yield b'data: {"choices": [{"delta": {"content": "par"}}]}\n\n'
+            raise httpx.ReadError("connection lost")
+
+        with self.provider_stream(lambda request: httpx.Response(200, content=body())):
+            r, events = self.stream("fast")
+        self.assertEqual(events[1]["choices"][0]["delta"]["content"], "par")
+        self.assertIn("error", events[-1])
+        self.assertNotIn("[DONE]", events)
+        entry = reqlog.read_logs()[0]
+        self.assertEqual((entry["status"], entry["response"]["text"]), ("error", "par"))
 
     def test_route_only_skips_the_model(self):
         post = AsyncMock()

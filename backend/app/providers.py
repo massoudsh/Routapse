@@ -1,4 +1,6 @@
-"""Provider adapters. Every adapter returns (text, usage)."""
+"""Provider adapters. complete() returns (text, usage); stream() yields text deltas and fills a usage dict."""
+import json
+
 import httpx
 
 from .config import settings
@@ -13,22 +15,17 @@ def _split_system(messages: list[dict]):
     return system, [m for m in messages if m["role"] != "system"]
 
 
-async def _openai_like(p: Provider, model: str, messages, params):
+def _openai_request(p: Provider, model: str, messages, params):
     if p.kind == "ollama":
         base = (p.base_url or settings.ollama_url).rstrip("/") + "/v1"
     else:
         base = (p.base_url or "https://api.openai.com/v1").rstrip("/")
-    r = await client.post(
-        f"{base}/chat/completions",
-        headers={"Authorization": f"Bearer {p.api_key or 'none'}"},
-        json={"model": model, "messages": messages, **params},
-    )
-    r.raise_for_status()
-    d = r.json()
-    return d["choices"][0]["message"]["content"], d.get("usage", {})
+    return f"{base}/chat/completions", {
+        "headers": {"Authorization": f"Bearer {p.api_key or 'none'}"},
+        "json": {"model": model, "messages": messages, **params}}
 
 
-async def _anthropic(p: Provider, model: str, messages, params):
+def _anthropic_request(p: Provider, model: str, messages, params):
     system, msgs = _split_system(messages)
     body = {"model": model, "messages": msgs, "max_tokens": params.get("max_tokens", 1024)}
     if system:
@@ -36,19 +33,11 @@ async def _anthropic(p: Provider, model: str, messages, params):
     for k in ("temperature", "top_p"):
         if k in params:
             body[k] = params[k]
-    r = await client.post(
-        (p.base_url or "https://api.anthropic.com").rstrip("/") + "/v1/messages",
-        headers={"x-api-key": p.api_key, "anthropic-version": "2023-06-01"},
-        json=body,
-    )
-    r.raise_for_status()
-    d = r.json()
-    text = "".join(b.get("text", "") for b in d["content"] if b["type"] == "text")
-    u = d.get("usage", {})
-    return text, {"prompt_tokens": u.get("input_tokens"), "completion_tokens": u.get("output_tokens")}
+    return (p.base_url or "https://api.anthropic.com").rstrip("/") + "/v1/messages", {
+        "headers": {"x-api-key": p.api_key, "anthropic-version": "2023-06-01"}, "json": body}
 
 
-async def _gemini(p: Provider, model: str, messages, params):
+def _gemini_request(p: Provider, model: str, messages, params, method="generateContent"):
     system, msgs = _split_system(messages)
     body = {"contents": [
         {"role": "model" if m["role"] == "assistant" else "user", "parts": [{"text": m["content"]}]}
@@ -62,16 +51,105 @@ async def _gemini(p: Provider, model: str, messages, params):
     if cfg:
         body["generationConfig"] = cfg
     base = (p.base_url or "https://generativelanguage.googleapis.com").rstrip("/")
-    r = await client.post(f"{base}/v1beta/models/{model}:generateContent",
-                          params={"key": p.api_key}, json=body)
+    return f"{base}/v1beta/models/{model}:{method}", {"params": {"key": p.api_key}, "json": body}
+
+
+def _anthropic_usage(u: dict) -> dict:
+    return {"prompt_tokens": u.get("input_tokens"), "completion_tokens": u.get("output_tokens")}
+
+
+def _gemini_usage(u: dict) -> dict:
+    return {"prompt_tokens": u.get("promptTokenCount"), "completion_tokens": u.get("candidatesTokenCount")}
+
+
+async def _openai_like(p: Provider, model: str, messages, params):
+    url, kw = _openai_request(p, model, messages, params)
+    r = await client.post(url, **kw)
+    r.raise_for_status()
+    d = r.json()
+    return d["choices"][0]["message"]["content"], d.get("usage", {})
+
+
+async def _anthropic(p: Provider, model: str, messages, params):
+    url, kw = _anthropic_request(p, model, messages, params)
+    r = await client.post(url, **kw)
+    r.raise_for_status()
+    d = r.json()
+    text = "".join(b.get("text", "") for b in d["content"] if b["type"] == "text")
+    return text, _anthropic_usage(d.get("usage", {}))
+
+
+async def _gemini(p: Provider, model: str, messages, params):
+    url, kw = _gemini_request(p, model, messages, params)
+    r = await client.post(url, **kw)
     r.raise_for_status()
     d = r.json()
     text = "".join(x.get("text", "") for x in d["candidates"][0]["content"]["parts"])
-    u = d.get("usageMetadata", {})
-    return text, {"prompt_tokens": u.get("promptTokenCount"), "completion_tokens": u.get("candidatesTokenCount")}
+    return text, _gemini_usage(d.get("usageMetadata", {}))
 
 
 async def complete(p: Provider, model: str, messages: list[dict], params: dict):
     params = {k: v for k, v in params.items() if k in PARAMS and v is not None}
     fn = {"anthropic": _anthropic, "gemini": _gemini}.get(p.kind, _openai_like)
     return await fn(p, model, messages, params)
+
+
+async def _events(r: httpx.Response):
+    """Yield the JSON payload of every `data:` line of a server-sent-event response."""
+    async for line in r.aiter_lines():
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data and data != "[DONE]":
+            yield json.loads(data)
+
+
+def _openai_delta(ev: dict, usage: dict) -> str:
+    if ev.get("usage"):
+        usage.update(ev["usage"])
+    choices = ev.get("choices") or []
+    return (choices[0].get("delta") or {}).get("content") or "" if choices else ""
+
+
+def _anthropic_delta(ev: dict, usage: dict) -> str:
+    kind = ev.get("type")
+    if kind == "message_start":
+        usage.update(_anthropic_usage((ev.get("message") or {}).get("usage") or {}))
+    elif kind == "message_delta":
+        usage["completion_tokens"] = (ev.get("usage") or {}).get("output_tokens")
+    elif kind == "content_block_delta":
+        return (ev.get("delta") or {}).get("text") or ""
+    return ""
+
+
+def _gemini_delta(ev: dict, usage: dict) -> str:
+    if ev.get("usageMetadata"):
+        usage.update(_gemini_usage(ev["usageMetadata"]))
+    cands = ev.get("candidates") or []
+    parts = ((cands[0].get("content") or {}).get("parts") or []) if cands else []
+    return "".join(x.get("text", "") for x in parts)
+
+
+async def stream(p: Provider, model: str, messages: list[dict], params: dict, usage: dict):
+    """Yield text deltas as the provider produces them; token usage is written into `usage`."""
+    params = {k: v for k, v in params.items() if k in PARAMS and v is not None}
+    if p.kind == "anthropic":
+        url, kw = _anthropic_request(p, model, messages, params)
+        kw["json"]["stream"] = True
+        delta = _anthropic_delta
+    elif p.kind == "gemini":
+        url, kw = _gemini_request(p, model, messages, params, "streamGenerateContent")
+        kw["params"]["alt"] = "sse"
+        delta = _gemini_delta
+    else:
+        url, kw = _openai_request(p, model, messages, params)
+        kw["json"].update(stream=True, stream_options={"include_usage": True})
+        delta = _openai_delta
+    async with client.stream("POST", url, **kw) as r:
+        if r.is_error:
+            await r.aread()  # so the error body is available to the caller
+            r.raise_for_status()
+        async for ev in _events(r):
+            text = delta(ev, usage)
+            if text:
+                yield text
