@@ -60,6 +60,7 @@ Authentication: `Authorization: Bearer $ADMIN_TOKEN` when `ADMIN_TOKEN` is set.
 | `POST /admin/chat` | Prompt studio: send messages through a router or model, optionally forcing a lane. |
 | `GET /admin/logs` | Request log. Query: `limit`, `offset`, `router_id`, `source`, `q`. |
 | `GET /admin/logs/info` | Log directory, files and whether bodies are logged. |
+| `POST /admin/vault/export` | Write the request log to an Obsidian vault (`VAULT_DIR`). Returns the note count, or 400 if disabled. |
 | `GET /admin/ollama/models` | Models installed on an Ollama server. Query: `base_url` (optional). |
 
 ## Router object

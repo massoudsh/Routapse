@@ -17,6 +17,7 @@ reads it for build options and passes it to the containers.
 | `LOG_DIR` | `logs` (Compose: `/logs`) | backend | Directory for `requests-YYYY-MM-DD.jsonl`. |
 | `LOG_BODIES` | `true` | backend | `false` logs metadata only, with no prompt or response text. |
 | `LOG_RETENTION_DAYS` | `0` | backend | Delete daily log files older than this many days (checked at most hourly per process). `0` keeps every file. |
+| `VAULT_DIR` | empty | backend | Obsidian vault directory for the on-demand exporter. Empty disables it. |
 
 ## Router sidecar
 
@@ -55,3 +56,6 @@ Without Docker, set `OLLAMA_URL=http://localhost:11434`.
 - **Logs.** With `LOG_BODIES=true`, logs contain prompts and responses. Authorization headers and API keys are never
   logged. Old daily files are kept unless `LOG_RETENTION_DAYS` is set.
 - **Redis keys** use the prefix `routapse:`.
+- **Vault.** With `VAULT_DIR` set, `POST /admin/vault/export` writes one markdown note per logged request into that
+  directory, plus an index note per router, lane, model and source. Notes follow `LOG_BODIES`, so a metadata-only log
+  produces notes without prompts or answers. Export is explicit; nothing is written at request time.

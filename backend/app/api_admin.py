@@ -2,7 +2,7 @@
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
-from . import engine, reqlog
+from . import engine, reqlog, vault
 from .auth import admin_auth
 from .config import settings
 from .schemas import ModelDef, Provider, RouterDef, SavedPrompt, StudioRequest, TestRequest
@@ -164,6 +164,14 @@ def logs(limit: int = 100, offset: int = 0, router_id: str | None = None,
 @api.get("/logs/info")
 def logs_info():
     return reqlog.info()
+
+
+# ---- Obsidian vault export (opt-in via VAULT_DIR) ----
+@api.post("/vault/export")
+def vault_export():
+    if not settings.vault_dir:
+        raise HTTPException(400, "VAULT_DIR is not set; the vault exporter is disabled")
+    return vault.export()
 
 
 # ---- Ollama auto-discovery ----

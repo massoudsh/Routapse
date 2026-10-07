@@ -12,6 +12,7 @@ class Settings:
     log_dir = os.getenv("LOG_DIR", "logs")
     log_bodies = os.getenv("LOG_BODIES", "true").lower() != "false"
     log_retention_days = int(os.getenv("LOG_RETENTION_DAYS", "0") or 0)  # 0 keeps every file
+    vault_dir = os.getenv("VAULT_DIR", "").strip()  # empty disables the Obsidian vault exporter
 
 
 settings = Settings()
