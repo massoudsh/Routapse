@@ -158,9 +158,14 @@ def _gemini_delta(ev: dict, usage: dict) -> str:
     return "".join(x.get("text", "") for x in parts)
 
 
+def _stream_options_rejected(e: httpx.HTTPError) -> bool:
+    return isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 400
+
+
 async def stream(p: Provider, model: str, messages: list[dict], params: dict, usage: dict):
     """Yield text deltas as the provider produces them; token usage is written into `usage`."""
     params = {k: v for k, v in params.items() if k in PARAMS and v is not None}
+    uses_stream_options = False
     if p.kind == "anthropic":
         url, kw = _anthropic_request(p, model, messages, params)
         kw["json"]["stream"] = True
@@ -172,8 +177,10 @@ async def stream(p: Provider, model: str, messages: list[dict], params: dict, us
     else:
         url, kw = _openai_request(p, model, messages, params)
         kw["json"].update(stream=True, stream_options={"include_usage": True})
+        uses_stream_options = True
         delta = _openai_delta
-    for attempt in range(p.retries + 1):
+    retries_used = 0
+    for _ in range(p.retries + 2):
         started = False
         try:
             async with client.stream("POST", url, timeout=p.timeout, **kw) as r:
@@ -187,8 +194,13 @@ async def stream(p: Provider, model: str, messages: list[dict], params: dict, us
                         yield text
             return
         except httpx.HTTPError as e:
+            if not started and uses_stream_options and _stream_options_rejected(e):
+                kw["json"].pop("stream_options", None)
+                uses_stream_options = False
+                continue
             # once text has reached the caller a retry would repeat it, so only retry before that
-            if started or attempt == p.retries or not _retryable(e):
+            if started or retries_used == p.retries or not _retryable(e):
                 raise
             usage.clear()
-            await asyncio.sleep(_backoff(e, attempt))
+            await asyncio.sleep(_backoff(e, retries_used))
+            retries_used += 1

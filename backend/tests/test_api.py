@@ -7,8 +7,10 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastapi.testclient import TestClient
 
-from app import providers, reqlog
+from app import api_gateway, providers, reqlog
+from app.config import settings
 from app.main import app
+from app.rate_limit import RateLimiter
 from app.store import store
 from tests.test_engine import FakeRouterClient, response
 
@@ -92,6 +94,16 @@ class GatewayTests(ApiTestCase):
         self.assertEqual(body["model"], "fast")
         self.assertEqual(body["routapse"]["label"], "answer")
         self.assertEqual(r.headers["x-routapse-route"], "answer")
+
+    def test_gateway_rate_limit_returns_retry_after(self):
+        with patch.object(settings, "gateway_rate_limit", 1), patch.object(api_gateway, "limiter", RateLimiter()), self.classify_as("refuse"):
+            first = self.client.post("/v1/chat/completions", json={
+                "model": "router:support", "messages": [{"role": "user", "content": "hi"}]})
+            second = self.client.post("/v1/chat/completions", json={
+                "model": "router:support", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+        self.assertTrue(second.headers["retry-after"].isdigit())
 
     def test_respond_lane_never_calls_a_provider(self):
         post = AsyncMock()

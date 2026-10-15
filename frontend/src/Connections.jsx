@@ -14,7 +14,8 @@ export default function Connections() {
   const [providers, setProviders] = useState([]);
   const [models, setModels] = useState([]);
   const [err, setErr] = useState("");
-  const [p, setP] = useState({ id: "", kind: "ollama", base_url: "", api_key: "" });
+  const blankProvider = (kind = "ollama") => ({ id: "", kind, base_url: "", api_key: "", timeout: 120, retries: 2 });
+  const [p, setP] = useState(blankProvider());
   const [m, setM] = useState({ id: "", provider_id: "", model_name: "", description: "" });
   const [found, setFound] = useState(null);       // Ollama discovery result for the default URL
   const [forProvider, setForProvider] = useState(null); // discovery for the provider chosen in the model form
@@ -43,7 +44,9 @@ export default function Connections() {
   const connectOllama = (list) => run(async () => {
     const pid = providers.find((x) => x.kind === "ollama" && (x.base_url || found.base_url) === found.base_url)?.id || "ollama";
     if (!providers.some((x) => x.id === pid))
-      await api.put(`/providers/${pid}`, { id: pid, kind: "ollama", base_url: found.base_url, api_key: "" });
+      await api.put(`/providers/${pid}`, {
+        id: pid, kind: "ollama", base_url: found.base_url, api_key: "", timeout: 120, retries: 2,
+      });
     for (const name of list) {
       const id = slug(name);
       if (!models.some((x) => x.id === id))
@@ -54,7 +57,7 @@ export default function Connections() {
   const addProvider = (e) => {
     e.preventDefault();
     const id = p.id || slug(p.kind + "-" + (p.base_url || "default"));
-    run(async () => { await api.put(`/providers/${id}`, { ...p, id }); setP({ id: "", kind: p.kind, base_url: "", api_key: "" }); });
+    run(async () => { await api.put(`/providers/${id}`, { ...p, id }); setP(blankProvider(p.kind)); });
   };
   const addModel = (e) => {
     e.preventDefault();
@@ -113,6 +116,14 @@ export default function Connections() {
               <input type="password" value={p.api_key} onChange={(e) => setP({ ...p, api_key: e.target.value })} />
             </label>
           )}
+          <label>Request timeout (seconds)
+            <input type="number" min="1" max="600" step="1" required value={p.timeout}
+              onChange={(e) => setP({ ...p, timeout: Number(e.target.value) })} />
+          </label>
+          <label>Retries after a transient failure
+            <input type="number" min="0" max="5" step="1" required value={p.retries}
+              onChange={(e) => setP({ ...p, retries: Number(e.target.value) })} />
+          </label>
           <button className="primary">Add provider</button>
         </form>
       </section>

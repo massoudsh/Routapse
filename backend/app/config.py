@@ -13,6 +13,7 @@ class Settings:
     log_bodies = os.getenv("LOG_BODIES", "true").lower() != "false"
     log_retention_days = int(os.getenv("LOG_RETENTION_DAYS", "0") or 0)  # 0 keeps every file
     vault_dir = os.getenv("VAULT_DIR", "").strip()  # empty disables the Obsidian vault exporter
+    gateway_rate_limit = int(os.getenv("GATEWAY_RATE_LIMIT", "0") or 0)  # requests per client per rolling minute; 0 is off
 
 
 settings = Settings()

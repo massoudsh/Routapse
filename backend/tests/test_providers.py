@@ -120,6 +120,24 @@ class ProviderStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["stream_options"], {"include_usage": True})
         self.assertEqual(body["temperature"], 0.1)
 
+    async def test_openai_compatible_stream_retries_without_usage_option_when_rejected(self):
+        provider = Provider(id="p", kind="openai_compat", base_url="http://llm/v1", retries=0)
+        seen = []
+
+        def handler(request):
+            seen.append(json.loads(request.content))
+            if "stream_options" in seen[-1]:
+                return httpx.Response(400, text="unknown parameter: stream_options")
+            return httpx.Response(200, content=b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n')
+
+        mock = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(providers, "client", mock):
+            texts = [text async for text in providers.stream(provider, "model-x", MESSAGES, {}, {})]
+        self.assertEqual(texts, ["ok"])
+        self.assertEqual(len(seen), 2)
+        self.assertIn("stream_options", seen[0])
+        self.assertNotIn("stream_options", seen[1])
+
     async def test_anthropic_stream(self):
         provider = Provider(id="p", kind="anthropic", api_key="key")
         texts, usage, request = await stream(provider, [

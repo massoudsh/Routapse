@@ -6,10 +6,20 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import engine
 from .auth import gateway_auth
+from .config import settings
+from .rate_limit import limiter
 from .schemas import ChatRequest, Message
 from .store import store
 
 api = APIRouter(prefix="/v1", dependencies=[Depends(gateway_auth)])
+
+
+def _limit(request: Request):
+    client = request.client.host if request.client else "unknown"
+    retry_after = limiter.check(client, settings.gateway_rate_limit)
+    if retry_after:
+        raise HTTPException(429, "gateway rate limit exceeded", headers={"Retry-After": str(retry_after)})
+
 
 
 async def _sse(cid: str, model: str, chunks, info):
@@ -37,7 +47,7 @@ def list_models():
 
 
 @api.post("/chat/completions")
-async def chat(req: ChatRequest, request: Request):
+async def chat(req: ChatRequest, request: Request, _: None = Depends(_limit)):
     messages = [m.model_dump() for m in req.messages]
     params = {"temperature": req.temperature, "max_tokens": req.max_tokens, "top_p": req.top_p}
     router = engine.load_router(req.model.split(":", 1)[1]) if req.model.startswith("router:") else None
@@ -60,7 +70,7 @@ async def chat(req: ChatRequest, request: Request):
 
 
 @api.post("/route/{router_id}")
-async def route_only(router_id: str, messages: list[Message], request: Request):
+async def route_only(router_id: str, messages: list[Message], request: Request, _: None = Depends(_limit)):
     """Middle-model mode: get the routing decision (and Laya signals) without calling any LLM."""
     if not messages:
         raise HTTPException(400, "messages must not be empty")
