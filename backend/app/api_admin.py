@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from . import engine, reqlog, vault
 from .auth import admin_auth
 from .config import settings
-from .schemas import ModelDef, Provider, RouterDef, SavedPrompt, StudioRequest, TestRequest
+from .schemas import AgentDef, ModelDef, Provider, RouterDef, SavedPrompt, StudioRequest, TestRequest
 from .store import store
 
 api = APIRouter(prefix="/admin", dependencies=[Depends(admin_auth)])
@@ -61,6 +61,7 @@ def models_put(id: str, body: ModelDef):
 def models_delete(id: str):
     used = [r["name"] for r in store.list("routers")
             if any(id in (x.get("model_id"), x.get("fallback_model_id")) for x in r.get("routes", []))]
+    used += [a["name"] for a in store.list("agents") if a.get("model_id") == id]
     if used:
         raise HTTPException(409, f"still used by router(s): {', '.join(used)}")
     store.delete("models", id)
@@ -108,6 +109,57 @@ def routers_put(id: str, body: RouterDef):
 @api.delete("/routers/{id}")
 def routers_delete(id: str):
     store.delete("routers", id)
+    return {"ok": True}
+
+
+# ---- agent definitions ----
+def _validate_agents(candidate: AgentDef):
+    agents = {a["id"]: a for a in store.list("agents")}
+    agents[candidate.id] = candidate.model_dump()
+    if not store.get("models", candidate.model_id):
+        raise HTTPException(400, f"model '{candidate.model_id}' does not exist")
+    for handoff_id in candidate.handoffs:
+        if handoff_id not in agents:
+            raise HTTPException(400, f"handoff agent '{handoff_id}' does not exist")
+    visited, active = set(), set()
+
+    def visit(id_):
+        if id_ in active:
+            raise HTTPException(400, "agent handoffs cannot contain a cycle")
+        if id_ in visited:
+            return
+        active.add(id_)
+        for target in agents[id_].get("handoffs", []):
+            if target not in agents:
+                raise HTTPException(400, f"handoff agent '{target}' does not exist")
+            visit(target)
+        active.remove(id_)
+        visited.add(id_)
+
+    for id_ in agents:
+        visit(id_)
+
+
+@api.get("/agents")
+def agents_list():
+    return store.list("agents")
+
+
+@api.put("/agents/{id}")
+def agents_put(id: str, body: AgentDef):
+    if body.id != id:
+        raise HTTPException(400, "id in path and body differ")
+    _validate_agents(body)
+    store.put("agents", id, body.model_dump())
+    return body
+
+
+@api.delete("/agents/{id}")
+def agents_delete(id: str):
+    used = [a["name"] for a in store.list("agents") if id in a.get("handoffs", [])]
+    if used:
+        raise HTTPException(409, f"still used for handoff by: {', '.join(used)}")
+    store.delete("agents", id)
     return {"ok": True}
 
 

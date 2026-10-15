@@ -313,6 +313,19 @@ class AdminTests(ApiTestCase):
             self.assertEqual(self.client.get("/admin/routers").status_code, 401)
             self.assertEqual(self.client.get("/admin/routers", headers={"Authorization": "Bearer token"}).status_code, 200)
 
+    def test_agents_require_existing_models_and_cycle_free_handoffs(self):
+        missing = self.client.put("/admin/agents/a", json={"id": "a", "name": "A", "model_id": "none"})
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(self.client.put("/admin/agents/b", json={"id": "b", "name": "B", "model_id": "fast"}).status_code, 200)
+        self.assertEqual(self.client.put("/admin/agents/a", json={"id": "a", "name": "A", "model_id": "fast", "handoffs": ["b"]}).status_code, 200)
+        cycle = self.client.put("/admin/agents/b", json={"id": "b", "name": "B", "model_id": "fast", "handoffs": ["a"]})
+        self.assertEqual(cycle.status_code, 400)
+        self.assertEqual([a["id"] for a in self.client.get("/admin/agents").json()], ["b", "a"])
+        self.assertEqual(self.client.delete("/admin/models/fast").status_code, 409)
+        self.assertEqual(self.client.delete("/admin/agents/b").status_code, 409)
+        self.assertEqual(self.client.delete("/admin/agents/a").status_code, 200)
+        self.assertEqual(self.client.delete("/admin/agents/b").status_code, 200)
+
     def test_provider_keys_are_masked_and_preserved(self):
         self.assertEqual(self.client.get("/admin/providers").json()[0]["api_key"], "***")
         r = self.client.put("/admin/providers/local", json={**PROVIDER, "api_key": "***", "base_url": "http://new/v1"})

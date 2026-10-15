@@ -79,6 +79,14 @@ class ProviderAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.kwargs["params"], {"key": "key"})
         self.assertTrue(call.args[0].endswith("/v1beta/models/model-x:generateContent"))
 
+    async def test_openai_chat_preserves_tool_schema(self):
+        provider = Provider(id="p", kind="openai_compat", base_url="http://llm/v1")
+        post = AsyncMock(return_value=reply({"choices": []}))
+        with patch.object(providers.client, "post", post):
+            await providers.openai_chat(provider, "model-x", MESSAGES, {"tools": [{"type": "function"}], "tool_choice": "auto"})
+        self.assertEqual(post.call_args.kwargs["json"]["tools"], [{"type": "function"}])
+        self.assertEqual(post.call_args.kwargs["json"]["tool_choice"], "auto")
+
     async def test_http_errors_propagate(self):
         provider = Provider(id="p", kind="openai", retries=0)
         post = AsyncMock(return_value=reply({"error": "bad"}, status=429))

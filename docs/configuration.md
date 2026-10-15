@@ -19,6 +19,9 @@ reads it for build options and passes it to the containers.
 | `LOG_RETENTION_DAYS` | `0` | backend | Delete daily log files older than this many days (checked at most hourly per process). `0` keeps every file. |
 | `VAULT_DIR` | empty | backend | Obsidian vault directory for the on-demand exporter. Empty disables it. |
 | `GATEWAY_RATE_LIMIT` | `0` | gateway | Maximum requests per client IP over a rolling minute. `0` disables the in-process limiter. |
+| `AGENT_GATEWAY_URL` | `http://gateway:8000/v1` | gateway | Internal OpenAI-compatible Gateway URL used by Agent SDK model calls. For a direct local run, use `http://localhost:8002/v1`. |
+| `AGENT_SESSION_DB` | `agent-sessions.db` | gateway | SQLite path for Agent SDK sessions. Compose persists `/data` as `agent-data`. |
+| `AGENT_TRACING` | `false` | gateway | Enable the Agent SDK tracing exporter. Keep disabled unless tracing is configured. |
 
 ## Router sidecar
 

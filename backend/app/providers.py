@@ -8,7 +8,7 @@ from .config import settings
 from .schemas import Provider
 
 client = httpx.AsyncClient(timeout=120)
-PARAMS = ("temperature", "max_tokens", "top_p")
+PARAMS = ("temperature", "max_tokens", "top_p", "tools", "tool_choice")
 
 
 def _split_system(messages: list[dict]):
@@ -94,6 +94,14 @@ async def _post(p: Provider, url: str, kw: dict) -> httpx.Response:
             if attempt == p.retries or not _retryable(e):
                 raise
             await asyncio.sleep(_backoff(e, attempt))
+
+
+async def openai_chat(p: Provider, model: str, messages: list[dict], params: dict) -> dict:
+    """Raw Chat Completions response for tool-calling clients such as the Agent SDK."""
+    if p.kind not in {"openai", "openai_compat", "ollama"}:
+        raise ValueError(f"provider kind '{p.kind}' does not support OpenAI tool calls")
+    url, kw = _openai_request(p, model, messages, {k: v for k, v in params.items() if k in PARAMS and v is not None})
+    return (await _post(p, url, kw)).json()
 
 
 async def _openai_like(p: Provider, model: str, messages, params):

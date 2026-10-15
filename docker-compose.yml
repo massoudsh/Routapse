@@ -26,7 +26,7 @@ services:
     ports: ["8000:8000"]
     depends_on: [router, redis]
     extra_hosts: ["host.docker.internal:host-gateway"]
-    volumes: ["logs:/logs"]
+    volumes: ["logs:/logs", "agent-data:/data"]
 
   admin:             # control plane: config, prompt studio, logs, Ollama discovery
     build:
@@ -56,4 +56,5 @@ services:
 volumes:
   redis-data:
   logs:
+  agent-data:
   laya-cache:

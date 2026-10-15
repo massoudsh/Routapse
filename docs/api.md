@@ -38,6 +38,13 @@ return a normal HTTP error (for example 502). If the provider fails midway, the 
 `data: {"error": {...}}` event and no `[DONE]`. The request log is written when the stream ends, so a
 request abandoned by the client is logged with status `cancelled` and the text sent so far.
 
+### `POST /v1/agents/{agent_id}/runs`
+
+Runs a configured Agent SDK agent. Body: `{"input": "...", "session_id": "optional-stable-id"}`. The result carries
+`output`, the agent that produced it, `session_id`, and a `trace_id`. Agents invoke the configured internal Gateway,
+so their `model_id` is always an existing Routapse model alias. Tool calls require a direct alias backed by an
+OpenAI-compatible, OpenAI, or Ollama provider; routed model ids and streaming tool calls are rejected.
+
 ### `POST /v1/route/{router_id}`
 
 Returns the same decision object without calling any LLM. Body: a list of `{"role", "content"}` messages.
@@ -56,6 +63,7 @@ Authentication: `Authorization: Bearer $ADMIN_TOKEN` when `ADMIN_TOKEN` is set.
 | `GET/PUT/DELETE /admin/models[/{id}]` | Model aliases: provider, model name at the provider. |
 | `GET/PUT/DELETE /admin/routers[/{id}]` | Routers: lanes, signals, rules, fallback, minimum confidence. |
 | `GET/PUT/DELETE /admin/prompts[/{id}]` | Saved prompts for the prompt studio. |
+| `GET/PUT/DELETE /admin/agents[/{id}]` | Agent definitions: model alias, instructions, allowlisted tools, handoffs, term guardrails and turn limit. |
 | `POST /admin/test` | Route (and optionally run) a prompt against a saved or draft router. |
 | `POST /admin/chat` | Prompt studio: send messages through a router or model, optionally forcing a lane. |
 | `GET /admin/logs` | Request log. Query: `limit`, `offset`, `router_id`, `source`, `q`. |

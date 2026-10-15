@@ -4,11 +4,11 @@ import json, time, uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import engine
+from . import agents, engine, providers, reqlog
 from .auth import gateway_auth
 from .config import settings
 from .rate_limit import limiter
-from .schemas import ChatRequest, Message
+from .schemas import AgentRunRequest, ChatRequest, Message, Provider
 from .store import store
 
 api = APIRouter(prefix="/v1", dependencies=[Depends(gateway_auth)])
@@ -40,6 +40,35 @@ async def _sse(cid: str, model: str, chunks, info):
     yield "data: [DONE]\n\n"
 
 
+async def _tool_completion(req: ChatRequest, messages: list[dict], params: dict, request: Request, cid: str):
+    if req.model.startswith("router:"):
+        raise HTTPException(400, "tool calls require a direct model alias")
+    model = store.get("models", req.model)
+    if not model:
+        raise HTTPException(404, f"model '{req.model}' does not exist")
+    provider = store.get("providers", model["provider_id"])
+    if not provider:
+        raise HTTPException(502, f"provider '{model['provider_id']}' does not exist")
+    started = time.perf_counter()
+    try:
+        raw = await providers.openai_chat(Provider.model_validate(provider), model["model_name"], messages, params)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except Exception as e:
+        raise HTTPException(502, str(e)) from e
+    choice = (raw.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    reqlog.log_event({"source": "gateway", "status": "ok", "requested_model": req.model,
+                      "target_model": req.model, "request": {"messages": messages, "params": params},
+                      "response": {"text": message.get("content") or "", "usage": raw.get("usage", {})},
+                      "latency_ms": round((time.perf_counter() - started) * 1000),
+                      "client": request.client.host if request.client else None})
+    return JSONResponse({"id": raw.get("id", cid), "object": raw.get("object", "chat.completion"),
+                         "created": raw.get("created", int(time.time())), "model": req.model,
+                         "choices": raw.get("choices", []), "usage": raw.get("usage", {})},
+                        headers={"X-Routapse-Route": "direct", "X-Routapse-Model": req.model})
+
+
 @api.get("/models")
 def list_models():
     ids = [f"router:{r['id']}" for r in store.list("routers")] + [m["id"] for m in store.list("models")]
@@ -49,10 +78,15 @@ def list_models():
 @api.post("/chat/completions")
 async def chat(req: ChatRequest, request: Request, _: None = Depends(_limit)):
     messages = [m.model_dump() for m in req.messages]
-    params = {"temperature": req.temperature, "max_tokens": req.max_tokens, "top_p": req.top_p}
+    params = {"temperature": req.temperature, "max_tokens": req.max_tokens, "top_p": req.top_p,
+              "tools": req.tools, "tool_choice": req.tool_choice}
+    cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    if req.tools:
+        if req.stream:
+            raise HTTPException(400, "streaming tool calls are not supported")
+        return await _tool_completion(req, messages, params, request, cid)
     router = engine.load_router(req.model.split(":", 1)[1]) if req.model.startswith("router:") else None
     meta = {"client": request.client.host if request.client else None, "stream": req.stream}
-    cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     if req.stream:
         info, model, chunks = await engine.run_stream("gateway", messages, params, router=router,
                                                       model_id=None if router else req.model, meta=meta)
@@ -67,6 +101,23 @@ async def chat(req: ChatRequest, request: Request, _: None = Depends(_limit)):
         "id": cid, "object": "chat.completion", "created": int(time.time()), "model": shown,
         "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": out["text"]}}],
         "usage": out["usage"], "routapse": info}, headers=headers)
+
+
+@api.post("/agents/{agent_id}/runs")
+async def agent_run(agent_id: str, req: AgentRunRequest, request: Request, _: None = Depends(_limit)):
+    started = time.perf_counter()
+    try:
+        result = await agents.run(agent_id, req.input, req.session_id)
+    except HTTPException:
+        raise
+    except Exception as e:  # SDK errors should retain the gateway's standard HTTP error contract
+        raise HTTPException(502, str(e)) from e
+    reqlog.log_event({"source": "agent", "agent_id": agent_id, "status": "ok",
+                      "request": {"messages": [{"role": "user", "content": req.input}]},
+                      "response": {"text": result["output"], "usage": {}}, "trace_id": result["trace_id"],
+                      "latency_ms": round((time.perf_counter() - started) * 1000),
+                      "client": request.client.host if request.client else None})
+    return result
 
 
 @api.post("/route/{router_id}")

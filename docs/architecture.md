@@ -11,6 +11,9 @@ flowchart LR
     Gateway --> Router[Router sidecar]
     Router --> Classifier[Laya or Jev]
     Gateway --> Provider[LLM provider]
+    Gateway --> AgentSDK[Agent SDK orchestration]
+    AgentSDK --> Gateway
+    AgentSDK --> Session[(SQLite agent sessions)]
     Gateway --> Log[(Daily JSONL logs)]
 
     ProviderConfig[Provider] --> Model[Model]
@@ -33,7 +36,8 @@ flowchart LR
 | Signal | Router | An additional Laya classification output used by rules. |
 | Rule | Signal and route | Overrides a classifier choice when a signal comparison matches. |
 | Saved prompt | Router or model | Prompt-studio target and initial content. |
-| Request log entry | Router, decision, model, response | Immutable audit record for gateway, studio, test, and route-only requests. |
+| Agent | Model, allowlisted tools, handoffs, guardrails | SDK workflow that invokes models through the Gateway. |
+| Request log entry | Router, decision, model, response | Immutable audit record for gateway, studio, test, route-only, and agent requests. |
 
 ## Request lifecycle
 
@@ -46,13 +50,25 @@ flowchart LR
 7. For non-streaming requests, the gateway returns an OpenAI-compatible completion. For streaming requests, provider deltas are forwarded as server-sent events.
 8. The engine writes one request log record with the decision, response or partial response, usage, status, and latency.
 
+## Agent lifecycle
+
+1. An administrator saves an Agent that references a direct Model alias, an allowlist of internal tools, optional
+   handoff Agents, term-based input/output guardrails, and a turn cap.
+2. `POST /v1/agents/{id}/runs` loads the definition and executes it with the OpenAI Agents SDK. The SDK calls the
+   Gateway at `AGENT_GATEWAY_URL`, so the selected alias resolves through the normal Routapse Provider configuration.
+3. A stable `session_id` persists conversation history in the configured SQLite database. Each run returns and logs a
+   `trace_id`; external Agent SDK tracing is opt-in through `AGENT_TRACING=true`.
+4. Tool calls need a direct alias on an OpenAI-compatible, OpenAI, or Ollama Provider. The Gateway forwards tool
+   schemas and returns the provider's raw Chat Completions tool-call response.
+
 ## Invariants
 
 - A forwarding route must reference an existing model when its router is saved.
 - Route labels within a router are unique; the optional fallback must name one of them.
 - Signals and rules require the Laya router model.
 - A route's fallback model must exist and differ from its target model.
-- A model cannot be removed while a router route references it (as target or fallback); a provider cannot be removed while a model references it.
+- A model cannot be removed while a router route or agent references it; a provider cannot be removed while a model references it.
+- Agent handoffs must refer to saved agents and cannot form a cycle.
 - Credentials are masked in Admin API responses, though they are stored as plaintext in the configured store.
 
 ## Service boundaries

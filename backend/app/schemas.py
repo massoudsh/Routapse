@@ -71,6 +71,8 @@ class ChatRequest(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
     top_p: float | None = None
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
 
 
 class TestRequest(BaseModel):
@@ -98,3 +100,20 @@ class SavedPrompt(BaseModel):
     model_id: str | None = None
     system: str = ""
     user: str = ""
+
+
+class AgentDef(BaseModel):
+    id: str
+    name: str
+    instructions: str = ""
+    model_id: str
+    tools: list[Literal["list_models", "route_prompt"]] = Field(default_factory=list)
+    handoffs: list[str] = Field(default_factory=list)
+    input_blocked_terms: list[str] = Field(default_factory=list)
+    output_blocked_terms: list[str] = Field(default_factory=list)
+    max_turns: int = Field(10, ge=1, le=20)
+
+
+class AgentRunRequest(BaseModel):
+    input: str = Field(min_length=1)
+    session_id: str | None = None

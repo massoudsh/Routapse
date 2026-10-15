@@ -4,12 +4,14 @@ import Routers from "./Routers.jsx";
 import Studio from "./Studio.jsx";
 import Logs from "./Logs.jsx";
 import Connections from "./Connections.jsx";
+import Agents from "./Agents.jsx";
 
 const PAGES = [
   ["routers", "Routers"],
   ["studio", "Prompt studio"],
   ["logs", "Logs"],
   ["connections", "Connections"],
+  ["agents", "Agents"],
 ];
 
 export default function App() {
@@ -43,6 +45,7 @@ export default function App() {
         {page === "studio" && <Studio goRouters={() => setPage("routers")} />}
         {page === "logs" && <Logs />}
         {page === "connections" && <Connections />}
+        {page === "agents" && <Agents />}
       </main>
       {locked && (
         <div className="veil">
